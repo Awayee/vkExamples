@@ -14,6 +14,7 @@
 #include <fstream>
 
 #include "vkapp.h"
+#include "vkinit.h"
 
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
@@ -30,7 +31,16 @@
 #include <assimp/postprocess.h>
 
 #include "vkobj.h"
-
+#define VK_CHECK(x)                                                 \
+	do                                                              \
+	{                                                               \
+		VkResult err = x;                                           \
+		if (err)                                                    \
+		{                                                           \
+			std::cout <<"Detected Vulkan error: " << err << std::endl; \
+			abort();                                                \
+		}                                                           \
+	} while (0)
 
 
 #define OBJECT_INSTANCES 64
@@ -106,7 +116,6 @@ namespace vkapp {
 
 	void VkApp::OnInput(int key, int action) {
 		if (action == GLFW_PRESS || action == GLFW_REPEAT) {
-			std::cout << "哈哈哈: " << key << ", " << action << std::endl;
 			if (key == GLFW_KEY_LEFT) {
 				m_SpotLight.pos = glm::rotate(glm::mat4(1.0), glm::radians(10.0f), { 0.0f, 0.0f, 1.0f }) * glm::vec4(m_SpotLight.pos, 1.0f);
 			}
@@ -156,11 +165,13 @@ namespace vkapp {
 		InitCamera(&m_Camera);
 		CreateFrameBuffers();
 		CreateCommandPool();
+		CreateDescriptorPool(32);
 		CreateDescriptorSetLayout();
-		CreateTextureSampler();
-		CreateModel(&m_Model);
+		CreateTextureSampler(&m_TextureSampler, VK_SAMPLER_ADDRESS_MODE_REPEAT);
 		InitLight();
+		CreateModel(&m_Model);
 		CreateCommandBuffers();
+		CreateShadowMapCommandBuffer(&m_PointLight.shadowPass);
 		CreateSyncObjects();
 	}
 
@@ -176,6 +187,7 @@ namespace vkapp {
 	void VkApp::Clear() {
 		ClearSwapChain();
 		DestroyModel(&m_Model);
+		DestroyLight();
 		for (vkobj::Texture& texture : m_Textures) {
 			if (texture.image != VK_NULL_HANDLE) {
 				vkDestroyImage(m_Device, texture.image, nullptr);
@@ -188,6 +200,7 @@ namespace vkapp {
 			}
 		}
 		vkDestroyDescriptorSetLayout(m_Device, m_DescriptorSetLayout, nullptr);
+		vkDestroyDescriptorSetLayout(m_Device, m_ShadowMapDescriptorSetLayout, nullptr);
 		vkDestroySampler(m_Device, m_TextureSampler, nullptr);
 		//vkDestroySemaphore(m_Device, m_ImageAvailableSemaphore, nullptr);
 		//vkDestroySemaphore(m_Device, m_RenderFinishedSemaphore, nullptr);
@@ -288,9 +301,7 @@ namespace vkapp {
 			createInfo.pNext = nullptr;
 		}
 
-		if (vkCreateInstance(&createInfo, nullptr, &m_Instance) != VK_SUCCESS) {
-			throw std::runtime_error("创建Vulkan实例失败!");
-		}
+		VK_CHECK(vkCreateInstance(&createInfo, nullptr, &m_Instance));
 	}
 
 
@@ -521,9 +532,7 @@ namespace vkapp {
 			createInfo.enabledLayerCount = 0;
 		}
 
-		if (vkCreateDevice(m_PhysicalDevice, &createInfo, nullptr, &m_Device) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create logical device!");
-		}
+		VK_CHECK(vkCreateDevice(m_PhysicalDevice, &createInfo, nullptr, &m_Device));
 
 		vkGetDeviceQueue(m_Device, indices.graphicsFamily.value(), 0, &m_GraphicsQueue);
 		vkGetDeviceQueue(m_Device, indices.presentFamily.value(), 0, &m_PresentQueue);
@@ -572,12 +581,7 @@ namespace vkapp {
 
 		createInfo.oldSwapchain = VK_NULL_HANDLE;
 
-		if (vkCreateSwapchainKHR(m_Device, &createInfo, nullptr, &m_SwapChain) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create swap chain!");
-		}
-		else {
-			std::cout << "创建交换链成功!" << std::endl;
-		}
+		VK_CHECK(vkCreateSwapchainKHR(m_Device, &createInfo, nullptr, &m_SwapChain));
 		vkGetSwapchainImagesKHR(m_Device, m_SwapChain, &imageCount, nullptr);
 		m_SwapChainImages.resize(imageCount);
 		vkGetSwapchainImagesKHR(m_Device, m_SwapChain, &imageCount, m_SwapChainImages.data());
@@ -598,9 +602,7 @@ namespace vkapp {
 		createInfo.codeSize = code.size();
 		createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
 		VkShaderModule shaderModule;
-		if (vkCreateShaderModule(m_Device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create shader module!");
-		}
+		VK_CHECK(vkCreateShaderModule(m_Device, &createInfo, nullptr, &shaderModule));
 		return shaderModule;
 	}
 
@@ -666,181 +668,71 @@ namespace vkapp {
 		}
 	}
 
+
 	void VkApp::CreateGraphicsPipeline(VkPipeline& pipeline, VkPipelineLayout& pipelineLayout, std::string& vert, std::string& frag) {
-		auto vertShaderCode = ReadFile(vert);
-		auto fragShaderCode = ReadFile(frag);
-
-		// 创建Shader Stage
-		VkShaderModule vertShaderModule = CreateShaderModule(vertShaderCode);
-		VkShaderModule fragShaderModule = CreateShaderModule(fragShaderCode);
-
-		VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
-		vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-		vertShaderStageInfo.module = vertShaderModule;
-		vertShaderStageInfo.pName = "main";
-		VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
-		fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-		fragShaderStageInfo.module = fragShaderModule;
-		fragShaderStageInfo.pName = "main";
-
-		VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
-
-		// 顶点输入
-		VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-		vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-		auto bindingDescription = vkobj::Vertex::GetBindDescription();
-		auto attributeDescriptions = vkobj::Vertex::GetAttributeDescrioptions();
-		vertexInputInfo.vertexBindingDescriptionCount = 1;
-		vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-		vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributeDescriptions.size());
-		vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
-
-		// 输入组件
-		VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-		inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-		inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-		inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-		// 视口和裁剪
-		VkViewport viewport{};
-		viewport.x = 0.0f;
-		viewport.y = 0.0f;
-		viewport.width = (float)m_SwapChainExtent.width;
-		viewport.height = (float)m_SwapChainExtent.height;
-		viewport.minDepth = 0.0f;
-		viewport.maxDepth = 1.0f;
-
-		VkRect2D scissor{};
-		scissor.offset = { 0, 0 };
-		scissor.extent = m_SwapChainExtent;
-
-		VkPipelineViewportStateCreateInfo viewportState{};
-		viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-		viewportState.viewportCount = 1;
-		viewportState.pViewports = &viewport;
-		viewportState.scissorCount = 1;
-		viewportState.pScissors = &scissor;
-
-		// 光栅化
-		VkPipelineRasterizationStateCreateInfo rasterizer{};
-		rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-		rasterizer.depthClampEnable = VK_FALSE;
-		rasterizer.rasterizerDiscardEnable = VK_FALSE;
-		rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-		rasterizer.lineWidth = 1.0f;
-		rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
-		rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-		rasterizer.depthBiasEnable = VK_FALSE;
-		rasterizer.depthBiasConstantFactor = 0.0f; // Optional
-		rasterizer.depthBiasClamp = 0.0f; // Optional
-		rasterizer.depthBiasSlopeFactor = 0.0f; // Optional
-
-		// 重采样
-		VkPipelineMultisampleStateCreateInfo multisampling{};
-		multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-		multisampling.sampleShadingEnable = VK_FALSE;
-		multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-		multisampling.minSampleShading = 1.0f; // Optional
-		multisampling.pSampleMask = nullptr; // Optional
-		multisampling.alphaToCoverageEnable = VK_FALSE; // Optional
-		multisampling.alphaToOneEnable = VK_FALSE; // Optional
-
-		// 混合
-		VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-		colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-		colorBlendAttachment.blendEnable = VK_FALSE;
-		colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE; // Optional
-		colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO; // Optional
-		colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD; // Optional
-		colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; // Optional
-		colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; // Optional
-		colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD; // Optional
-
-		colorBlendAttachment.blendEnable = VK_TRUE;
-		colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-		colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-		colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-		colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-		colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-		colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-
-		VkPipelineColorBlendStateCreateInfo colorBlending{};
-		colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-		colorBlending.logicOpEnable = VK_FALSE;
-		colorBlending.logicOp = VK_LOGIC_OP_COPY; // Optional
-		colorBlending.attachmentCount = 1;
-		colorBlending.pAttachments = &colorBlendAttachment;
-		colorBlending.blendConstants[0] = 0.0f; // Optional
-		colorBlending.blendConstants[1] = 0.0f; // Optional
-		colorBlending.blendConstants[2] = 0.0f; // Optional
-		colorBlending.blendConstants[3] = 0.0f; // Optional
-
-		// 动态调整
-		VkDynamicState dynamicStates[] = {
-			VK_DYNAMIC_STATE_VIEWPORT,
-			VK_DYNAMIC_STATE_LINE_WIDTH
-		};
-
-		VkPipelineDynamicStateCreateInfo dynamicState{};
-		dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-		dynamicState.dynamicStateCount = 2;
-		dynamicState.pDynamicStates = dynamicStates;
-
-		// 管线重布局
-		VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-		pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-		pipelineLayoutInfo.setLayoutCount = 1; // 
-		pipelineLayoutInfo.pSetLayouts = &m_DescriptorSetLayout; // 
-		pipelineLayoutInfo.pushConstantRangeCount = 0; // Optional
-		pipelineLayoutInfo.pPushConstantRanges = nullptr; // Optional
-
-
-		if (vkCreatePipelineLayout(m_Device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create pipeline layout!");
-		}
-
-		// 深度缓冲
-		VkPipelineDepthStencilStateCreateInfo depthStencil{};
-		depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-		depthStencil.depthTestEnable = VK_TRUE;
-		depthStencil.depthWriteEnable = VK_TRUE;
-		depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-		depthStencil.depthBoundsTestEnable = VK_FALSE;  // 暂不使用深度范围
-		depthStencil.minDepthBounds = 0.0f;
-		depthStencil.maxDepthBounds = 1.0f;
-		depthStencil.stencilTestEnable = VK_FALSE;  // 暂不使用模板测试
-		depthStencil.front = {};
-		depthStencil.back = {};
-
 		// 图形管线
 		VkGraphicsPipelineCreateInfo pipelineInfo{};
 		pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-		pipelineInfo.stageCount = 2;
-		pipelineInfo.pStages = shaderStages;
+		// 创建Shader Stage
+		VkShaderModule vertShaderModule = (vert.data() != nullptr) ? vkinit::ShaderModule(m_Device, vert) : VK_NULL_HANDLE;
+		VkShaderModule fragShaderModule = (frag.data() != nullptr) ? vkinit::ShaderModule(m_Device, frag) : VK_NULL_HANDLE;
+		std::vector<VkPipelineShaderStageCreateInfo> shaderStages = vkinit::PipelineShaderStageCreateInfo(vertShaderModule, fragShaderModule);
+		pipelineInfo.stageCount = static_cast<uint32_t> (shaderStages.size());
+		pipelineInfo.pStages = shaderStages.data();
 
+		// 顶点输入
+		auto bindingDescription = vkobj::Vertex::GetBindDescription();
+		auto attributeDescriptions = vkobj::Vertex::GetAttributeDescrioptions();
+		VkPipelineVertexInputStateCreateInfo vertexInputInfo = vkinit::PipelineVertexInputStateCreateInfo(1, &bindingDescription, attributeDescriptions.size(), attributeDescriptions.data());
 		pipelineInfo.pVertexInputState = &vertexInputInfo;
+
+		// 输入组件
+		VkPipelineInputAssemblyStateCreateInfo inputAssembly = vkinit::PipelineInputAssemblyStateCreateInfo();
 		pipelineInfo.pInputAssemblyState = &inputAssembly;
+
+		// 视口和裁剪
+		VkViewport viewport = vkinit::Viewport((float)m_SwapChainExtent.width, float(m_SwapChainExtent.height));
+		VkRect2D scissor = vkinit::Rect2D(m_SwapChainExtent.width, m_SwapChainExtent.height);
+		VkPipelineViewportStateCreateInfo viewportState = vkinit::PipelineViewportStateCreateInfo(&viewport, &scissor);
 		pipelineInfo.pViewportState = &viewportState;
+
+
+		// 光栅化
+		VkPipelineRasterizationStateCreateInfo rasterizer = vkinit::PipelineRasterizationStateCreateInfo();
 		pipelineInfo.pRasterizationState = &rasterizer;
+
+
+		// 重采样
+		VkPipelineMultisampleStateCreateInfo multisampling = vkinit::PipelineMultisampleStateCreateInfo();
 		pipelineInfo.pMultisampleState = &multisampling;
-		pipelineInfo.pDepthStencilState = &depthStencil;
+
+
+
+		// 混合
+		VkPipelineColorBlendAttachmentState blendAttachment = vkinit::PipelineColorBlendAttachmentState();
+		VkPipelineColorBlendStateCreateInfo colorBlending = vkinit::PipelineColorBlendStateCreateInfo(1, &blendAttachment);
 		pipelineInfo.pColorBlendState = &colorBlending;
+
+		// 动态调整
+		VkPipelineDynamicStateCreateInfo dynamicState = vkinit::PipelineDynamicStateCreateInfo();
 		pipelineInfo.pDynamicState = nullptr; // Optional
 
+		// 深度缓冲
+		VkPipelineDepthStencilStateCreateInfo depthStencil = vkinit::PipelineDepthStencilStateCreateInfo();
+		pipelineInfo.pDepthStencilState = &depthStencil;
+
+
+		// 管线重布局
+		VkPipelineLayoutCreateInfo pipelineLayoutInfo = vkinit::PipelineLayoutCreateInfo(1, &m_DescriptorSetLayout);
+		VK_CHECK(vkCreatePipelineLayout(m_Device, &pipelineLayoutInfo, nullptr, &pipelineLayout));
 		pipelineInfo.layout = pipelineLayout;
+
 		pipelineInfo.renderPass = m_RenderPass;
 		pipelineInfo.subpass = 0;
 
 		pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
 		pipelineInfo.basePipelineIndex = -1; // Optional
-		if (vkCreateGraphicsPipelines(m_Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create graphics pipeline!");
-		}
-		else {
-			std::cout << "创建渲染管线成功!" << std::endl;
-		}
+		VK_CHECK(vkCreateGraphicsPipelines(m_Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline));
 		// 清理着色器模型
 		vkDestroyShaderModule(m_Device, vertShaderModule, nullptr);
 		vkDestroyShaderModule(m_Device, fragShaderModule, nullptr);
@@ -862,9 +754,7 @@ namespace vkapp {
 			framebufferInfo.height = m_SwapChainExtent.height;
 			framebufferInfo.layers = 1;
 
-			if (vkCreateFramebuffer(m_Device, &framebufferInfo, nullptr, &m_SwapChainFrameBuffers[i]) != VK_SUCCESS) {
-				throw std::runtime_error("failed to create framebuffer!");
-			}
+			VK_CHECK(vkCreateFramebuffer(m_Device, &framebufferInfo, nullptr, &m_SwapChainFrameBuffers[i]));
 		}
 	}
 
@@ -876,9 +766,7 @@ namespace vkapp {
 		poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
 		poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
 		poolInfo.flags = 0; // Optional
-		if (vkCreateCommandPool(m_Device, &poolInfo, nullptr, &m_CommandPool) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create command pool!");
-		}
+		VK_CHECK(vkCreateCommandPool(m_Device, &poolInfo, nullptr, &m_CommandPool));
 	}
 
 	void VkApp::CreateCommandBuffers() {
@@ -891,19 +779,14 @@ namespace vkapp {
 		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 		allocInfo.commandBufferCount = bufferSize;
 
-		if (vkAllocateCommandBuffers(m_Device, &allocInfo, m_CommandBuffers.data()) != VK_SUCCESS) {
-			throw std::runtime_error("failed to allocate command buffers!");
-		}
-
+		VK_CHECK(vkAllocateCommandBuffers(m_Device, &allocInfo, m_CommandBuffers.data()));
 		for (size_t i = 0; i < bufferSize; i++) {
 			VkCommandBufferBeginInfo beginInfo{};
 			beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 			beginInfo.flags = 0; // Optional
 			beginInfo.pInheritanceInfo = nullptr; // Optional
 
-			if (vkBeginCommandBuffer(m_CommandBuffers[i], &beginInfo) != VK_SUCCESS) {
-				throw std::runtime_error("开启记录指令缓冲区失败!");
-			}
+			VK_CHECK(vkBeginCommandBuffer(m_CommandBuffers[i], &beginInfo));
 
 			VkRenderPassBeginInfo renderPassInfo{};
 			renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -930,9 +813,7 @@ namespace vkapp {
 				vkCmdDrawIndexed(m_CommandBuffers[i], static_cast<uint32_t>(mesh.indices.size()), 1, 0, 0, 0);
 			}
 			vkCmdEndRenderPass(m_CommandBuffers[i]);
-			if (vkEndCommandBuffer(m_CommandBuffers[i]) != VK_SUCCESS) {
-				throw std::runtime_error("failed to record command buffer!");
-			}
+			VK_CHECK(vkEndCommandBuffer(m_CommandBuffers[i]));
 			std::cout << "指令缓冲区记录结束! index=" << i << std::endl;
 		}
 	}
@@ -940,10 +821,7 @@ namespace vkapp {
 	void VkApp::CreateSyncObjects() {
 		//VkSemaphoreCreateInfo semaphoreInfo{};
 		//semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-		//if (vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &m_ImageAvailableSemaphore) != VK_SUCCESS ||
-		//	vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &m_RenderFinishedSemaphore) != VK_SUCCESS) {
-		//	throw std::runtime_error("failed to create semaphores!");
-		//}
+		//VK_CHECK(vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &m_ImageAvailableSemaphore));
 		m_ImageAvailableSemaphores.resize(MAX_FRAME_IN_FLIGHT);
 		m_RenderFinishedSemaphores.resize(MAX_FRAME_IN_FLIGHT);
 		m_InLightFences.resize(MAX_FRAME_IN_FLIGHT);
@@ -957,11 +835,9 @@ namespace vkapp {
 		fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
 		for (size_t i = 0; i < MAX_FRAME_IN_FLIGHT; i++) {
-			if (vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &m_ImageAvailableSemaphores[i]) != VK_SUCCESS ||
-				vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &m_RenderFinishedSemaphores[i]) != VK_SUCCESS ||
-				vkCreateFence(m_Device, &fenceInfo, nullptr, &m_InLightFences[i]) != VK_SUCCESS) {
-				throw std::runtime_error("创建信号量出错!");
-			}
+			VK_CHECK(vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &m_ImageAvailableSemaphores[i]));
+			VK_CHECK(vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &m_RenderFinishedSemaphores[i]));
+			VK_CHECK(vkCreateFence(m_Device, &fenceInfo, nullptr, &m_InLightFences[i]));
 		}
 	}
 
@@ -984,12 +860,25 @@ namespace vkapp {
 
 		m_ImagesInLight[imageIndex] = m_InLightFences[m_CurrentFrame];
 		UpdateUniformBuffer(&m_Model, &m_Camera, &m_Light);
+		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+
+		// 先提交阴影纹理
+		VkSubmitInfo shadowMapSubmit = {};
+		shadowMapSubmit.pNext = nullptr;
+		shadowMapSubmit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		shadowMapSubmit.waitSemaphoreCount = 1;
+		shadowMapSubmit.pWaitSemaphores = &m_ImageAvailableSemaphores[m_CurrentFrame];
+		shadowMapSubmit.signalSemaphoreCount = 1;
+		shadowMapSubmit.pSignalSemaphores = &m_PointLight.shadowPass.semaphore;
+		shadowMapSubmit.pWaitDstStageMask = waitStages;
+		shadowMapSubmit.commandBufferCount = 1;
+		shadowMapSubmit.pCommandBuffers = &m_PointLight.shadowPass.cmdBuffer;
+		VK_CHECK(vkQueueSubmit(m_GraphicsQueue, 1, &shadowMapSubmit, VK_NULL_HANDLE));
 		// 提交指令缓冲
 		VkSubmitInfo submitInfo{};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-		VkSemaphore waitSemaphores[] = { m_ImageAvailableSemaphores[m_CurrentFrame] };
-		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+		VkSemaphore waitSemaphores[] = { m_PointLight.shadowPass.semaphore };
 		submitInfo.waitSemaphoreCount = 1;
 		submitInfo.pWaitSemaphores = waitSemaphores;
 		submitInfo.pWaitDstStageMask = waitStages;
@@ -1003,9 +892,7 @@ namespace vkapp {
 
 		// 提交前重置栅栏
 		vkResetFences(m_Device, 1, &m_InLightFences[m_CurrentFrame]);
-		if (vkQueueSubmit(m_GraphicsQueue, 1, &submitInfo, m_InLightFences[m_CurrentFrame]) != VK_SUCCESS) {
-			throw std::runtime_error("failed to submit draw command buffer!");
-		}
+		VK_CHECK(vkQueueSubmit(m_GraphicsQueue, 1, &submitInfo, m_InLightFences[m_CurrentFrame]));
 
 		// 呈现
 		VkPresentInfoKHR presentInfo{};
@@ -1088,9 +975,7 @@ namespace vkapp {
 		bufferInfo.usage = usage;
 		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-		if (vkCreateBuffer(m_Device, &bufferInfo, nullptr, &buffer) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create vertex buffer!");
-		}
+		VK_CHECK(vkCreateBuffer(m_Device, &bufferInfo, nullptr, &buffer));
 
 		VkMemoryRequirements memRequirements;
 		vkGetBufferMemoryRequirements(m_Device, buffer, &memRequirements);
@@ -1100,9 +985,7 @@ namespace vkapp {
 		allocInfo.allocationSize = memRequirements.size;
 		allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
-		if (vkAllocateMemory(m_Device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
-			throw std::runtime_error("failed to allocate vertex buffer memory!");
-		}
+		VK_CHECK(vkAllocateMemory(m_Device, &allocInfo, nullptr, &bufferMemory));
 		vkBindBufferMemory(m_Device, buffer, bufferMemory, 0);
 	}
 
@@ -1173,30 +1056,28 @@ namespace vkapp {
 	}
 
 	void VkApp::CreateDescriptorSetLayout() {
-		VkDescriptorSetLayoutBinding uboLayoutBinding{};
-		uboLayoutBinding.binding = 0;
-		uboLayoutBinding.descriptorCount = 1;
-		uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-		uboLayoutBinding.pImmutableSamplers = nullptr;
-
+		auto uboLayoutBinding = vkinit::DescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
 		// 图像采样
-		VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-		samplerLayoutBinding.binding = 1;
-		samplerLayoutBinding.descriptorCount = 1;
-		samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		samplerLayoutBinding.pImmutableSamplers = nullptr;
-		samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+		auto samplerLayoutBinding = vkinit::DescriptorSetLayoutBinding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+		// 深度图
+		auto shadowMapSampler = vkinit::DescriptorSetLayoutBinding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
 
-		std::array<VkDescriptorSetLayoutBinding, 2> bindings = { uboLayoutBinding, samplerLayoutBinding };
+		std::array<VkDescriptorSetLayoutBinding, 3> bindings = { uboLayoutBinding, samplerLayoutBinding, shadowMapSampler };
 
 		VkDescriptorSetLayoutCreateInfo layoutInfo{};
 		layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 		layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
 		layoutInfo.pBindings = bindings.data();
-		if (vkCreateDescriptorSetLayout(m_Device, &layoutInfo, nullptr, &m_DescriptorSetLayout) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create descriptor set layout!");
-		}
+		VK_CHECK(vkCreateDescriptorSetLayout(m_Device, &layoutInfo, nullptr, &m_DescriptorSetLayout));
+
+		// 创建阴影映射布局
+		auto shadowMapBinding = vkinit::DescriptorSetLayoutBinding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+		VkDescriptorSetLayoutCreateInfo shadowLayoutInfo{};
+		shadowLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		shadowLayoutInfo.bindingCount = 1;
+		shadowLayoutInfo.pBindings = &shadowMapBinding;
+		VK_CHECK(vkCreateDescriptorSetLayout(m_Device, &layoutInfo, nullptr, &m_ShadowMapDescriptorSetLayout));
+
 	}
 
 	void VkApp::UpdateUniformBuffer(vkobj::Model* pModel, vkobj::Camera* pCamera, vkobj::PointLight* pLight) {
@@ -1208,6 +1089,17 @@ namespace vkapp {
 		ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
 		ubo.proj = glm::perspective(glm::radians(45.0f), m_SwapChainExtent.width / (float)m_SwapChainExtent.height, 0.1f, 10.0f);
 		ubo.proj[1][1] *= -1;*/
+		glm::mat4 lightVP = glm::ortho(-10.0f, 10.0f, -10.0f, 10.0f, 1.0f, 100.0f) *
+			glm::lookAt(m_PointLight.pos, { 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f });
+
+		// 阴影通道
+		
+		ShadowMVP shadowMvp{};
+		shadowMvp.mvp = lightVP * pModel->transform;
+		void* shadowMvpData;
+		vkMapMemory(m_Device, pModel->uniformMemory, 0, sizeof(shadowMvpData), 0, &shadowMvpData);
+		memcpy(shadowMvpData, &shadowMvp, sizeof(shadowMvp));
+		vkUnmapMemory(m_Device, pModel->uniformMemory);
 
 		for (vkobj::Mesh& mesh : pModel->meshes) {
 			UniformBufferObject ubo{};
@@ -1229,6 +1121,7 @@ namespace vkapp {
 			ubo.spotLightPos = m_SpotLight.pos;
 			ubo.spotLightDir = glm::normalize(m_SpotLight.dir);
 			ubo.spotLightPhi = glm::cos(m_SpotLight.phi);
+			ubo.lightVP = lightVP;
 
 			void* data;
 			vkMapMemory(m_Device, mesh.material.uniformBufferMemory, 0, sizeof(ubo), 0, &data);
@@ -1240,18 +1133,17 @@ namespace vkapp {
 	void VkApp::CreateDescriptorPool(uint32_t count) {
 		std::vector<VkDescriptorPoolSize> poolSizes = {
 			{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1},
-			{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, count},
+			{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, count?count * 3:count+3},
 			{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count},
+			{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count}
 		};
 
 		VkDescriptorPoolCreateInfo poolInfo{};
 		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
 		poolInfo.pPoolSizes = poolSizes.data();
-		poolInfo.maxSets = count;
-		if (vkCreateDescriptorPool(m_Device, &poolInfo, nullptr, &m_DescriptorPool) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create descriptor pool!");
-		}
+		poolInfo.maxSets = count * 2;
+		VK_CHECK(vkCreateDescriptorPool(m_Device, &poolInfo, nullptr, &m_DescriptorPool));
 
 	}
 
@@ -1261,12 +1153,10 @@ namespace vkapp {
 		allocInfo.descriptorPool = m_DescriptorPool;
 		allocInfo.descriptorSetCount = 1;
 		allocInfo.pSetLayouts = &m_DescriptorSetLayout;
-		if (vkAllocateDescriptorSets(m_Device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
-			throw std::runtime_error("Failed to allocate descriptor sets!");
-		}
+		VK_CHECK(vkAllocateDescriptorSets(m_Device, &allocInfo, &descriptorSet));
 
 		// 更新描述符配置
-		VkWriteDescriptorSet descriptorWrites[2] = {};
+		VkWriteDescriptorSet descriptorWrites[3] = {};
 		// 统一缓冲
 		VkDescriptorBufferInfo bufferInfo{};
 		bufferInfo.buffer = uniformBuffer;
@@ -1293,7 +1183,45 @@ namespace vkapp {
 		descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		descriptorWrites[1].descriptorCount = 1;
 		descriptorWrites[1].pImageInfo = &imageInfo;
-		vkUpdateDescriptorSets(m_Device, 2, descriptorWrites, 0, nullptr);
+
+		// 阴影纹理
+		VkDescriptorImageInfo shadowMapInfo{};
+		shadowMapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		shadowMapInfo.imageView = m_PointLight.shadowPass.depthImageView;
+		shadowMapInfo.sampler = m_PointLight.shadowPass.depthSampler;
+		descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrites[2].dstSet = descriptorSet;
+		descriptorWrites[2].dstBinding = 2;
+		descriptorWrites[2].dstArrayElement = 0;
+		descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		descriptorWrites[2].descriptorCount = 1;
+		descriptorWrites[2].pImageInfo = &shadowMapInfo;
+		vkUpdateDescriptorSets(m_Device, 3, descriptorWrites, 0, nullptr);
+	}
+
+	void VkApp::CreateShadowMapDescriptroSet(VkDescriptorSet& descriptorSet, VkBuffer uniformBuffer) {
+		VkDescriptorSetAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocInfo.descriptorPool = m_DescriptorPool;
+		allocInfo.descriptorSetCount = 1;
+		allocInfo.pSetLayouts = &m_ShadowMapDescriptorSetLayout;
+		VK_CHECK(vkAllocateDescriptorSets(m_Device, &allocInfo, &descriptorSet));
+
+		// 更新描述符配置
+		VkWriteDescriptorSet descriptorWrites{};
+		// 统一缓冲
+		VkDescriptorBufferInfo bufferInfo{};
+		bufferInfo.buffer = uniformBuffer;
+		bufferInfo.offset = 0;
+		bufferInfo.range = sizeof(ShadowMVP);
+		descriptorWrites.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptorWrites.dstSet = descriptorSet;
+		descriptorWrites.dstBinding = 0;
+		descriptorWrites.dstArrayElement = 0;
+		descriptorWrites.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		descriptorWrites.descriptorCount = 1;
+		descriptorWrites.pBufferInfo = &bufferInfo;
+		vkUpdateDescriptorSets(m_Device, 1, &descriptorWrites, 0, nullptr);
 	}
 
 	VkCommandBuffer VkApp::BeginSingleTimeCommands() {
@@ -1414,9 +1342,7 @@ namespace vkapp {
 		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-		if (vkCreateImage(m_Device, &imageInfo, nullptr, &image) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create image!");
-		}
+		VK_CHECK(vkCreateImage(m_Device, &imageInfo, nullptr, &image));
 
 		VkMemoryRequirements memRequirements;
 		vkGetImageMemoryRequirements(m_Device, image, &memRequirements);
@@ -1426,9 +1352,7 @@ namespace vkapp {
 		allocInfo.allocationSize = memRequirements.size;
 		allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, properties);
 
-		if (vkAllocateMemory(m_Device, &allocInfo, nullptr, &memory) != VK_SUCCESS) {
-			throw std::runtime_error("failed to allocate image memory!");
-		}
+		VK_CHECK(vkAllocateMemory(m_Device, &allocInfo, nullptr, &memory));
 
 		vkBindImageMemory(m_Device, image, memory, 0);
 	}
@@ -1445,21 +1369,19 @@ namespace vkapp {
 		viewInfo.subresourceRange.levelCount = 1;
 		viewInfo.subresourceRange.baseArrayLayer = 0;
 		viewInfo.subresourceRange.layerCount = 1;
-		if (vkCreateImageView(m_Device, &viewInfo, nullptr, imageView) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create texture image view!");
-		}
+		VK_CHECK(vkCreateImageView(m_Device, &viewInfo, nullptr, imageView));
 	}
 
-	void VkApp::CreateTextureSampler() {
+	void VkApp::CreateTextureSampler(VkSampler* pSampler, VkSamplerAddressMode addressMode) {
 		VkSamplerCreateInfo samplerInfo{};
 		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
 		// 缩放系数
 		samplerInfo.magFilter = VK_FILTER_LINEAR;
 		samplerInfo.minFilter = VK_FILTER_LINEAR;
 		// 填充模式
-		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+		samplerInfo.addressModeU = addressMode;
+		samplerInfo.addressModeV = addressMode;
+		samplerInfo.addressModeW = addressMode;
 		// 各向异性
 		samplerInfo.anisotropyEnable = VK_TRUE;
 		// 获取各向异性最大采样次数
@@ -1477,9 +1399,7 @@ namespace vkapp {
 		samplerInfo.minLod = 0.0f;
 		samplerInfo.maxLod = 0.0f;
 
-		if (vkCreateSampler(m_Device, &samplerInfo, nullptr, &m_TextureSampler) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create texture sampler!");
-		}
+		VK_CHECK(vkCreateSampler(m_Device, &samplerInfo, nullptr, pSampler));
 	}
 
 
@@ -1652,7 +1572,6 @@ namespace vkapp {
 		if (aiscene != nullptr) {
 			uint32_t count = GetMeshCount(aiscene->mRootNode);
 			std::cout << "Meshes count of model is " << count << std::endl;
-			CreateDescriptorPool(count);
 			LoadNode(aiscene->mRootNode, aiscene, pModel);
 		}
 		else {
@@ -1678,7 +1597,19 @@ namespace vkapp {
 			// 描述符
 			CreateDescriptorSet(mesh.material.descriptorSet, mesh.material.uniformBuffer, mesh.material.texture->imageView);
 		}
+		// 阴影映射
+		CreateBuffer(sizeof(ShadowMVP),
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, 
+			pModel->uniform, pModel->uniformMemory);
+		CreateShadowMapDescriptroSet(pModel->descriptorSet, pModel->uniform);
+
 		pModel->transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 0.0f, -0.75f));
+	}
+
+
+	void VkApp::DrawModel(vkobj::Model* pModel) {
+
 	}
 
 	void VkApp::DestroyModel(vkobj::Model* pModel) {
@@ -1691,6 +1622,8 @@ namespace vkapp {
 			vkDestroyBuffer(m_Device, mesh.material.uniformBuffer, nullptr);
 			vkFreeMemory(m_Device, mesh.material.uniformBufferMemory, nullptr);
 		}
+		vkDestroyBuffer(m_Device, pModel->uniform, nullptr);
+		vkFreeMemory(m_Device, pModel->uniformMemory, nullptr);
 	}
 
 	void VkApp::InitCamera(vkobj::Camera* pCamera) {
@@ -1750,6 +1683,7 @@ namespace vkapp {
 		m_PointLight.color = { 0.4f, 0.8f, 0.9f };
 		m_PointLight.pos = { 1.0f, -1.0f, 1.0f };
 		m_PointLight.strength = 1.0;
+		CreateShadowMapPass(&m_PointLight.shadowPass);
 
 		// 聚光灯
 		m_SpotLight.color = { 0.9f, 0.9f, 0.6f };
@@ -1757,4 +1691,177 @@ namespace vkapp {
 		m_SpotLight.dir = { -1.0f, -1.0f, -1.0f };
 		m_SpotLight.phi = glm::radians(22.0f);
 	}
+
+	void VkApp::DestroyLight() {
+		DestroyShadowMapPass(&m_PointLight.shadowPass);
+	}
+
+	void VkApp::DestroyShadowMapPass(vkobj::ShadowMapPass* pPass) {
+		vkDestroyImage(m_Device, pPass->depthImage, nullptr);
+		vkFreeMemory(m_Device, pPass->depthImageMemory, nullptr);
+		vkDestroyImageView(m_Device, pPass->depthImageView, nullptr);
+		vkDestroyPipeline(m_Device, pPass->pipeline, nullptr);
+		vkDestroyPipelineLayout(m_Device, pPass->pipelineLayout, nullptr);
+		vkDestroyRenderPass(m_Device, pPass->renderPass, nullptr);
+		vkDestroySampler(m_Device, pPass->depthSampler, nullptr);
+		vkDestroySemaphore(m_Device, pPass->semaphore, nullptr);
+		vkDestroyFramebuffer(m_Device, pPass->frameBuffer, nullptr);
+	}
+
+	void VkApp::CreateShadowMapPass(vkobj::ShadowMapPass* pPass) {
+
+		pPass->width = m_SwapChainExtent.width;
+		pPass->height = m_SwapChainExtent.height;
+		// 创建深度纹理
+		VkFormat format = FindDepthFormat();
+		CreateImage(pPass->width, pPass->height, format,
+			VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+			pPass->depthImage, pPass->depthImageMemory);
+		CreateImageView(&pPass->depthImageView, pPass->depthImage, format, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+		// 创建通道
+		VkRenderPassCreateInfo passInfo{};
+		passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		//     Depth attachment (shadow map)
+		VkAttachmentDescription attachment = vkinit::AttachmentDescription(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		passInfo.attachmentCount = 1;
+		passInfo.pAttachments = &attachment;
+		//     Attachment references from subpasses
+		VkAttachmentReference depthRef = vkinit::AttachmentReference(0, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+		//     Subpass 0: shadow map rendering
+		VkSubpassDescription subpass = vkinit::SubpassDescription(0, nullptr, &depthRef);
+		passInfo.subpassCount = 1;
+		passInfo.pSubpasses = &subpass;
+		//     Create render pass
+		passInfo.pNext = nullptr;
+		passInfo.dependencyCount = 0;
+		passInfo.pDependencies = nullptr;
+		passInfo.flags = 0;
+
+		VK_CHECK(vkCreateRenderPass(m_Device, &passInfo, nullptr, &pPass->renderPass));
+
+		// 创建帧缓冲
+		VkFramebufferCreateInfo frameBufferInfo{};
+		frameBufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		frameBufferInfo.pNext = nullptr;
+		frameBufferInfo.renderPass = pPass->renderPass;
+		frameBufferInfo.attachmentCount = 1;
+		frameBufferInfo.pAttachments = &pPass->depthImageView;
+		frameBufferInfo.width = pPass->width;
+		frameBufferInfo.height = pPass->height;
+		frameBufferInfo.layers = 1;
+		frameBufferInfo.flags = 0;
+
+		VkFramebuffer shadow_map_fb;
+		vkCreateFramebuffer(m_Device, &frameBufferInfo, nullptr, &pPass->frameBuffer);
+
+		// 创建采样器
+		CreateTextureSampler(&pPass->depthSampler, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
+		// 创建管线
+		VkGraphicsPipelineCreateInfo pipelineInfo{};
+		pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+		//     顶点输入
+		VkPipelineVertexInputStateCreateInfo vertexInfo = vkinit::PipelineVertexInputStateCreateInfo(1, &vkobj::Vertex::GetShadowMapBindDescription(), 1, vkobj::Vertex::GetShadowMapAttributeDescriptions().data());
+		pipelineInfo.pVertexInputState = &vertexInfo;
+		//    Shader
+		VkShaderModule vert = vkinit::ShaderModule(m_Device, "shaders/shadowmap.vert.spv");
+		std::vector<VkPipelineShaderStageCreateInfo> shaderStages = vkinit::PipelineShaderStageCreateInfo(vert, VK_NULL_HANDLE);
+		pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+		pipelineInfo.pStages = shaderStages.data();
+		// 输入组件
+		VkPipelineInputAssemblyStateCreateInfo inputAssembly = vkinit::PipelineInputAssemblyStateCreateInfo();
+		pipelineInfo.pInputAssemblyState = &inputAssembly;
+		// 视口和裁剪
+		VkViewport viewport = vkinit::Viewport((float)pPass->width, float(pPass->height));
+		VkRect2D scissor = vkinit::Rect2D(pPass->width, pPass->height);
+		VkPipelineViewportStateCreateInfo viewportState = vkinit::PipelineViewportStateCreateInfo(&viewport, &scissor);
+		pipelineInfo.pViewportState = &viewportState;
+		// 光栅化
+		VkPipelineRasterizationStateCreateInfo rasterizer = vkinit::PipelineRasterizationStateCreateInfo();
+		pipelineInfo.pRasterizationState = &rasterizer;
+
+		// 重采样
+		VkPipelineMultisampleStateCreateInfo multisampling = vkinit::PipelineMultisampleStateCreateInfo();
+		pipelineInfo.pMultisampleState = &multisampling;
+		// 混合
+		VkPipelineColorBlendAttachmentState blendAttachment = vkinit::PipelineColorBlendAttachmentState();
+		VkPipelineColorBlendStateCreateInfo colorBlending = vkinit::PipelineColorBlendStateCreateInfo(1, &blendAttachment);
+		pipelineInfo.pColorBlendState = &colorBlending;
+		// 动态调整
+		VkPipelineDynamicStateCreateInfo dynamicState = vkinit::PipelineDynamicStateCreateInfo();
+		pipelineInfo.pDynamicState = nullptr; // Optional
+		// 深度缓冲
+		VkPipelineDepthStencilStateCreateInfo depthStencil = vkinit::PipelineDepthStencilStateCreateInfo();
+		pipelineInfo.pDepthStencilState = &depthStencil;
+		// 管线布局
+		VkPipelineLayoutCreateInfo pipelineLayoutInfo = vkinit::PipelineLayoutCreateInfo(1, &m_DescriptorSetLayout);
+		// 推送常量
+		VkPushConstantRange pushConstant = vkinit::PushConstantRange(0, sizeof(ShadowMVP), VK_SHADER_STAGE_VERTEX_BIT);
+		pipelineLayoutInfo.pushConstantRangeCount = 1;
+		pipelineLayoutInfo.pPushConstantRanges = &pushConstant;
+		VK_CHECK(vkCreatePipelineLayout(m_Device, &pipelineLayoutInfo, nullptr, &pPass->pipelineLayout));
+		pipelineInfo.layout = pPass->pipelineLayout;
+
+		pipelineInfo.renderPass = pPass->renderPass;
+		pipelineInfo.subpass = 0;
+
+		pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // Optional
+		pipelineInfo.basePipelineIndex = -1; // Optional
+		VK_CHECK(vkCreateGraphicsPipelines(m_Device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pPass->pipeline));
+		vkDestroyShaderModule(m_Device, vert, nullptr);
+
+		//创建信号量
+		VkSemaphoreCreateInfo semaphoreInfo{};
+		semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+		vkCreateSemaphore(m_Device, &semaphoreInfo, nullptr, &pPass->semaphore);
+	}
+
+	void VkApp::CreateShadowMapCommandBuffer(vkobj::ShadowMapPass* pPass) {
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.commandPool = m_CommandPool;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandBufferCount = 1;
+		VK_CHECK(vkAllocateCommandBuffers(m_Device, &allocInfo, &pPass->cmdBuffer));
+
+		VkCommandBufferBeginInfo beginInfo{};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT; // Optional
+		beginInfo.pInheritanceInfo = nullptr; // Optional
+		VK_CHECK(vkBeginCommandBuffer(pPass->cmdBuffer, &beginInfo));
+
+		VkRenderPassBeginInfo renderPassInfo{};
+		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		renderPassInfo.renderPass = pPass->renderPass;
+		renderPassInfo.framebuffer = pPass->frameBuffer;
+		renderPassInfo.renderArea.offset = { 0, 0 };
+		renderPassInfo.renderArea.extent = { pPass->width, pPass->height };
+		VkClearValue clearValue = {};
+		clearValue.depthStencil = { 1.0f, 0 }; // 深度[0, 1]
+		renderPassInfo.clearValueCount = 1;
+		renderPassInfo.pClearValues = &clearValue;
+		vkCmdBeginRenderPass(pPass->cmdBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+		VkViewport viewport = vkinit::Viewport((float)pPass->width, (float)pPass->height);
+		vkCmdSetViewport(pPass->cmdBuffer, 0, 1, &viewport);
+
+		VkRect2D scissor = vkinit::Rect2D(pPass->width, pPass->height);
+		vkCmdSetScissor(pPass->cmdBuffer, 0, 1, &scissor);
+		vkCmdBindPipeline(pPass->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pPass->pipeline);
+		vkCmdBindDescriptorSets(pPass->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pPass->pipelineLayout, 0, 1, &m_Model.descriptorSet, 0, nullptr);
+		for (vkobj::Mesh& mesh : m_Model.meshes) {
+			VkBuffer buffers[] = { mesh.vertexBuffer };
+			VkDeviceSize offsets[] = { 0 };
+			vkCmdBindVertexBuffers(pPass->cmdBuffer, 0, 1, buffers, offsets);
+			vkCmdBindIndexBuffer(pPass->cmdBuffer, mesh.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+			vkCmdDrawIndexed(pPass->cmdBuffer, static_cast<uint32_t>(mesh.indices.size()), 1, 0, 0, 0);
+		}
+		vkCmdEndRenderPass(pPass->cmdBuffer);
+		VK_CHECK(vkEndCommandBuffer(pPass->cmdBuffer));
+
+	}
+
 }

@@ -109,11 +109,23 @@ namespace vkobj {
         VkDeviceMemory indexBufferMemory;
     };
 
-
     struct Model {
         const char* path;
         std::vector<Mesh> meshes;
         glm::mat4 transform;
+        // 阴影映射
+        VkBuffer uniform;
+        VkDeviceMemory uniformMemory;
+        VkDescriptorSet descriptorSet;
+    };
+
+    struct Cube {
+        glm::mat4 transform;
+        Mesh mesh;
+        // 阴影映射
+        VkBuffer uniform;
+        VkDeviceMemory uniformMemory;
+        VkDescriptorSet descriptorSet;
     };
 
     struct Camera {
@@ -154,10 +166,15 @@ namespace vkobj {
         VkImage depthImage;
         VkDeviceMemory depthImageMemory;
         VkImageView depthImageView;
+        VkSemaphore semaphore;
 
         VkFramebuffer frameBuffer;
         VkRenderPass renderPass;
         VkSampler depthSampler;
+        VkCommandBuffer cmdBuffer;
+
+        VkPipeline pipeline;
+        VkPipelineLayout pipelineLayout;
     };
     // 方向光
     struct DirectLight {
@@ -170,6 +187,7 @@ namespace vkobj {
         float strength;
         glm::vec3 color;
         glm::vec3 pos;
+        ShadowMapPass shadowPass;
     };
 
     // 聚光灯

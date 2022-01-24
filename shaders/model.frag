@@ -23,6 +23,7 @@ layout(binding = 0) uniform UniformBufferObject {
 } ubo;
 */
 layout(binding = 1) uniform sampler2D texSampler;
+layout(binding = 2) uniform sampler2D shadowMap;
 
 layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec2 fragTexCoord;
@@ -44,6 +45,8 @@ layout(location = 12) in vec3 spotLightColor;
 layout(location = 13) in vec3 spotLightPos;
 layout(location = 14) in vec3 spotLightDir;
 layout(location = 15) in float spotLightPhi;
+// 灯光坐标下位置
+layout(location = 16) in vec4 lightSpacePos;
 
 layout(location = 0) out vec4 outColor;
 
@@ -86,7 +89,20 @@ vec3 SpotLight(vec3 lightColor, vec3 lightPos, vec3 spotDir, float cosPhi, vec3 
     return intensity * Phong(lightColor, lightDir, viewDir, normal, texColor);
 }
 
+float CalShadow(){
+    float shadowVal = 0.8;
+    vec3 lightNDCPos = lightSpacePos.xyz / lightSpacePos.w;
+    if (abs(lightNDCPos.x) > 1.0 ||
+       abs(lightNDCPos.y) > 1.0 ||
+       abs(lightNDCPos.z) > 1.0)
+      return 0.0;
+    vec2 shadowCoord = lightNDCPos.xy * 0.5 + 0.5;
+    float texVal = texture(shadowMap, shadowCoord).r;
+    return lightNDCPos.z > texVal ? shadowVal : 0.0;
+}
+
 void main() {
+    /*
     vec3 normal = normalize(worldNormal);
     vec3 viewDir = normalize(viewPos - worldPos);
     vec3 texColor = texture(texSampler, fragTexCoord).rgb;
@@ -98,6 +114,13 @@ void main() {
     vec3 spot = SpotLight(spotLightColor, spotLightPos, spotLightDir, spotLightPhi, worldPos, viewDir, normal, texColor);
 
     outColor = vec4(direct + point + spot, 1.0);
+    */
+    vec3 normal = normalize(worldNormal);
+    vec3 viewDir = normalize(viewPos - worldPos);
+    vec3 texColor = texture(texSampler, fragTexCoord).rgb;
+    vec3 point = PointLight(pointLightColor, pointLightPos, worldPos, viewDir, normal, texColor);
+    float shadow = CalShadow();
+    outColor = vec4((1.0 - shadow) * point, 1.0);
 }
 /*
 void main(){

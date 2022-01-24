@@ -20,6 +20,8 @@ layout(binding = 0) uniform UniformBufferObject {
     vec3 spotLightPos;
     vec3 spotLightDir;
     float spotLightPhi;
+    // 灯光vp矩阵
+    mat4 lightVP;
 
 } ubo;
 
@@ -49,6 +51,8 @@ layout(location = 12) out vec3 spotLightColor;
 layout(location = 13) out vec3 spotLightPos;
 layout(location = 14) out vec3 spotLightDir;
 layout(location = 15) out float spotLightPhi;
+// 灯光阴影矩阵
+layout(location = 16) out vec4 lightSpacePos;
 
 void main() {
     gl_Position = ubo.proj * ubo.view * ubo.model * vec4(inPosition, 1.0);
@@ -76,5 +80,7 @@ void main() {
     spotLightDir = ubo.spotLightDir;
     spotLightPhi = ubo.spotLightPhi;
 
+    // 灯光坐标下的位置
+    lightSpacePos = ubo.lightVP * vec4(worldPos, 1.0);
 
 }

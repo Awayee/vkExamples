@@ -66,10 +66,17 @@ namespace vkapp {
         alignas(16)glm::vec3 spotLightPos;
         alignas(16)glm::vec3 spotLightDir;
         alignas(4)float spotLightPhi;
+
+        alignas(16)glm::mat4 lightVP;
     };
 
     struct DynamicUBO {
         glm::mat4* model = nullptr;
+    };
+
+    // 阴影纹理
+    struct ShadowMVP {
+        glm::mat4 mvp;
     };
 
     class VkApp {
@@ -104,6 +111,7 @@ namespace vkapp {
 
         VkRenderPass m_RenderPass;
         VkDescriptorSetLayout m_DescriptorSetLayout;
+        VkDescriptorSetLayout m_ShadowMapDescriptorSetLayout;
         VkPipelineLayout m_PipelineLayout;
 
         std::vector<VkFramebuffer> m_SwapChainFrameBuffers;
@@ -164,11 +172,12 @@ namespace vkapp {
         void CreateDescriptorSetLayout();
         void CreateGraphicsPipeline(VkPipeline& pipeline, VkPipelineLayout& pipelineLayout, std::string& vert, std::string& frag);
         void CreateCommandPool();
-        void CreateTextureSampler();
+        void CreateTextureSampler(VkSampler* pSampler, VkSamplerAddressMode addressMode);
         void CreateVertexBuffer(std::vector<vkobj::Vertex>& vertices, VkBuffer& vertexBuffer, VkDeviceMemory& vertexBufferMemory);
         void CreateIndexBuffer(std::vector<uint32_t>& indices, VkBuffer& indexBuffer, VkDeviceMemory& indexBufferMemory);
         void CreateDescriptorPool(uint32_t count);
         void CreateDescriptorSet(VkDescriptorSet& descriptorSet, VkBuffer uniformBuffer, VkImageView imageView);
+        void CreateShadowMapDescriptroSet(VkDescriptorSet& descriptorSet, VkBuffer uniformBuffer);
         void CreateFrameBuffers();
         void CreateCommandBuffers();
         void CreateSyncObjects();
@@ -243,8 +252,11 @@ namespace vkapp {
         void CreateModel(vkobj::Model* pModel);//创建模型
         void DrawModel(vkobj::Model* pModel);//绘制模型
         void DestroyModel(vkobj::Model* pModel);//销毁模型
+        // 方块
+        void CreateCube(vkobj::Cube* pCube); // 创建方块
 
         void CreateShadowMapPass(vkobj::ShadowMapPass* pPass);//创建阴影纹理通道
-        void CreateShadowMapCommandBuffer(VkCommandBuffer* pCmdBuffer); // 创建阴影纹理绘制指令
+        void DestroyShadowMapPass(vkobj::ShadowMapPass* pPass);//销毁阴影纹理通道
+        void CreateShadowMapCommandBuffer(vkobj::ShadowMapPass* pPass); // 创建阴影纹理绘制指令
     };
 }
